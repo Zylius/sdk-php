@@ -11,6 +11,7 @@ declare(strict_types=1);
 
 namespace Temporal\Worker;
 
+use Closure;
 use React\Promise\PromiseInterface;
 use Temporal\Internal\Events\EventEmitterTrait;
 use Temporal\Internal\Events\EventListenerInterface;
@@ -128,12 +129,27 @@ class Worker implements WorkerInterface, Identifiable, EventListenerInterface, D
     public function registerActivityImplementations(object ...$activity): WorkerInterface
     {
         foreach ($activity as $act) {
-            $class = \get_class($act);
-
-            foreach ($this->services->activitiesReader->fromClass($class) as $proto) {
-                $this->services->activities->add($proto->withInstance($act), false);
-            }
+            $this->registerActivity(\get_class($act), fn() => $act);
         }
+
+        return $this;
+    }
+
+    public function registerActivity(string $type, callable $factory = null): WorkerInterface
+    {
+        foreach ($this->services->activitiesReader->fromClass($type) as $proto) {
+            if ($factory !== null) {
+                $proto = $proto->withFactory($factory);
+            }
+            $this->services->activities->add($proto, false);
+        }
+
+        return $this;
+    }
+
+    public function registerActivityFinalizer(Closure $finalizer): WorkerInterface
+    {
+        $this->services->activities->addFinalizer($finalizer);
 
         return $this;
     }
@@ -155,6 +171,7 @@ class Worker implements WorkerInterface, Identifiable, EventListenerInterface, D
 
         // Activity routes
         $router->add(new Router\InvokeActivity($this->services, $this->rpc));
+        $router->add(new Router\InvokeLocalActivity($this->services, $this->rpc));
 
         // Workflow routes
         $router->add(new Router\StartWorkflow($this->services));

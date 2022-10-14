@@ -14,12 +14,15 @@ namespace Temporal\Internal\Workflow;
 use React\Promise\Deferred;
 use React\Promise\PromiseInterface;
 use Temporal\Exception\Failure\CanceledFailure;
+use Temporal\Internal\Support\DateInterval;
 use Temporal\Internal\Transport\CompletableResult;
+use Temporal\Internal\Transport\Request\NewTimer;
 use Temporal\Internal\Workflow\Process\Scope;
 use Temporal\Worker\Transport\Command\RequestInterface;
 use Temporal\Workflow\CancellationScopeInterface;
 use Temporal\Workflow\ScopedContextInterface;
 use Temporal\Workflow\WorkflowContextInterface;
+use Temporal\Internal\Transport\Request\UpsertSearchAttributes;
 
 class ScopeContext extends WorkflowContext implements ScopedContextInterface
 {
@@ -99,13 +102,14 @@ class ScopeContext extends WorkflowContext implements ScopedContextInterface
     }
 
     /**
+     * @param string $conditionGroupId
      * @param callable $condition
      * @return PromiseInterface
      */
-    protected function addCondition(callable $condition): PromiseInterface
+    protected function addCondition(string $conditionGroupId, callable $condition): PromiseInterface
     {
         $deferred = new Deferred();
-        $this->parent->awaits[] = [$condition, $deferred];
+        $this->parent->awaits[$conditionGroupId][] = [$condition, $deferred];
         $this->scope->onAwait($deferred);
 
         return new CompletableResult(
@@ -113,6 +117,61 @@ class ScopeContext extends WorkflowContext implements ScopedContextInterface
             $this->services->loop,
             $deferred->promise(),
             $this->scope->getLayer()
+        );
+    }
+
+    protected function addAsyncCondition(string $conditionGroupId, PromiseInterface $condition): PromiseInterface
+    {
+        $this->parent->asyncAwaits[$conditionGroupId][] = $condition;
+
+        return $condition->then(
+            function ($result) use ($conditionGroupId) {
+                $this->resolveConditionGroup($conditionGroupId);
+                return $result;
+            },
+            function () use ($conditionGroupId) {
+                $this->rejectConditionGroup($conditionGroupId);
+            }
+        );
+    }
+
+    /**
+     * Calculate unblocked conditions.
+     */
+    public function resolveConditions(): void
+    {
+        $this->parent->resolveConditions();
+    }
+
+    public function resolveConditionGroup(string $conditionGroupId): void
+    {
+        $this->parent->resolveConditionGroup($conditionGroupId);
+    }
+
+    public function rejectConditionGroup(string $conditionGroupId): void
+    {
+        $this->parent->rejectConditionGroup($conditionGroupId);
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public function timer($interval): PromiseInterface
+    {
+        $request = new NewTimer(DateInterval::parse($interval, DateInterval::FORMAT_SECONDS));
+        $result = $this->request($request);
+        $this->parent->timers->attach($result, $request);
+
+        return $result;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public function upsertSearchAttributes(array $searchAttributes): void
+    {
+        $this->request(
+            new UpsertSearchAttributes($searchAttributes)
         );
     }
 }

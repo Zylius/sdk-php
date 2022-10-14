@@ -2,12 +2,7 @@
 
 declare(strict_types=1);
 
-use Temporal\DataConverter\DataConverter;
-use Temporal\WorkerFactory;
-use Temporal\Worker\Transport\RoadRunner;
-use Temporal\Worker\Transport\Goridge;
-use Temporal\Tests;
-use Spiral\Goridge\Relay;
+use Temporal\Testing\WorkerFactory;
 
 require __DIR__ . '/../vendor/autoload.php';
 

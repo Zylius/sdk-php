@@ -13,6 +13,7 @@ namespace Temporal;
 
 use React\Promise\PromiseInterface;
 use Temporal\Activity\ActivityOptions;
+use Temporal\Activity\ActivityOptionsInterface;
 use Temporal\Client\WorkflowStubInterface;
 use Temporal\DataConverter\Type;
 use Temporal\DataConverter\ValuesInterface;
@@ -24,6 +25,7 @@ use Temporal\Workflow\ChildWorkflowOptions;
 use Temporal\Workflow\ChildWorkflowStubInterface;
 use Temporal\Workflow\ContinueAsNewOptions;
 use Temporal\Workflow\ExternalWorkflowStubInterface;
+use Temporal\Workflow\ParentClosePolicy;
 use Temporal\Workflow\ScopedContextInterface;
 use Temporal\Internal\Workflow\WorkflowContext;
 use Temporal\Workflow\WorkflowExecution;
@@ -37,7 +39,7 @@ use Temporal\Internal\Support\DateInterval;
  * This is main class you can use in your workflow code.
  *
  * @psalm-import-type TypeEnum from Type
- * @psalm-import-type DateIntervalFormat from DateInterval
+ * @psalm-import-type DateIntervalValue from DateInterval
  * @see DateInterval
  *
  * @template-extends Facade<ScopedContextInterface>
@@ -312,7 +314,7 @@ final class Workflow extends Facade
      *  }
      * </code>
      *
-     * @param DateIntervalFormat|positive-int|float $interval
+     * @param DateIntervalValue $interval
      * @param callable|PromiseInterface ...$conditions
      * @return PromiseInterface
      */
@@ -484,7 +486,7 @@ final class Workflow extends Facade
      *  }
      * </code>
      *
-     * @param DateIntervalFormat|positive-int|float $interval
+     * @param DateIntervalValue $interval
      * @return PromiseInterface
      * @throws OutOfContextException in the absence of the workflow execution context.
      */
@@ -633,6 +635,7 @@ final class Workflow extends Facade
      * This method is equivalent to {@see Workflow::executeChildWorkflow}, but
      * it takes the workflow class as the first argument, and the further api
      * is built on the basis of calls to the methods of the passed workflow.
+     * For starting abandon child workflow {@see Workflow::newUntypedChildWorkflowStub()}.
      *
      * <code>
      *  // Any workflow interface example:
@@ -692,6 +695,23 @@ final class Workflow extends Facade
      *      $workflow->signal('name');
      *
      *      // etc ...
+     *  }
+     * </code>
+     *
+     * To start abandoned child workflow use `yield` and method `start()`:
+     *
+     * <code>
+     *  #[WorkflowMethod]
+     *  public function handler()
+     *  {
+     *      // ExampleWorkflow proxy
+     *      $workflow = Workflow::newUntypedChildWorkflowStub(
+     *          'WorkflowName',
+     *           ChildWorkflowOptions::new()->withParentClosePolicy(ParentClosePolicy::POLICY_ABANDON)
+     *      );
+     *
+     *      // Start child workflow
+     *      yield $workflow->start(42);
      *  }
      * </code>
      *
@@ -814,7 +834,7 @@ final class Workflow extends Facade
     public static function executeActivity(
         string $type,
         array $args = [],
-        ActivityOptions $options = null,
+        ActivityOptionsInterface $options = null,
         \ReflectionType $returnType = null
     ): PromiseInterface {
         /** @var ScopedContextInterface $context */
@@ -852,11 +872,11 @@ final class Workflow extends Facade
      * @psalm-template T of object
      *
      * @param class-string<T> $class
-     * @param ActivityOptions|null $options
+     * @param ActivityOptionsInterface|null $options
      * @return T
      * @throws OutOfContextException in the absence of the workflow execution context.
      */
-    public static function newActivityStub(string $class, ActivityOptions $options = null): object
+    public static function newActivityStub(string $class, ActivityOptionsInterface $options = null): object
     {
         /** @var ScopedContextInterface $context */
         $context = self::getCurrentContext();
@@ -883,11 +903,11 @@ final class Workflow extends Facade
      *  }
      * </code>
      *
-     * @param ActivityOptions|null $options
+     * @param ActivityOptionsInterface|null $options
      * @return ActivityStubInterface
      * @throws OutOfContextException in the absence of the workflow execution context.
      */
-    public static function newUntypedActivityStub(ActivityOptions $options = null): ActivityStubInterface
+    public static function newUntypedActivityStub(ActivityOptionsInterface $options = null): ActivityStubInterface
     {
         /** @var ScopedContextInterface $context */
         $context = self::getCurrentContext();
@@ -907,5 +927,17 @@ final class Workflow extends Facade
         $context = self::getCurrentContext();
 
         return $context->getStackTrace();
+    }
+
+    /**
+     * Upsert search attributes
+     *
+     * @param array<string, mixed> $searchAttributes
+     */
+    public static function upsertSearchAttributes(array $searchAttributes): void
+    {
+        /** @var ScopedContextInterface $context */
+        $context = self::getCurrentContext();
+        $context->upsertSearchAttributes($searchAttributes);
     }
 }

@@ -11,6 +11,7 @@ declare(strict_types=1);
 
 namespace Temporal\Worker;
 
+use Closure;
 use Temporal\Internal\Declaration\Prototype\ActivityPrototype;
 use Temporal\Internal\Declaration\Prototype\WorkflowPrototype;
 
@@ -37,6 +38,12 @@ interface WorkerInterface
     public function registerWorkflowTypes(string ...$class): self;
 
     /**
+     * Register activity finalizer which is a callback being called after each activity. This
+     * can be used to clean up resources in your application.
+     */
+    public function registerActivityFinalizer(Closure $finalizer): self;
+
+    /**
      * Returns list of registered workflow prototypes.
      *
      * @return iterable<WorkflowPrototype>
@@ -44,6 +51,8 @@ interface WorkerInterface
     public function getWorkflows(): iterable;
 
     /**
+     * @deprecated use registerActivity() instead
+     * @see \Temporal\Worker\WorkerInterface::registerActivity()
      * Register one or multiple activity instances to be served by worker task queue. Activity implementation must
      * be stateless.
      *
@@ -51,6 +60,20 @@ interface WorkerInterface
      * @return $this
      */
     public function registerActivityImplementations(object ...$activity): self;
+
+    /**
+     * Register an activity via its type or via a factory. When an activity class doesn't require
+     * any external dependencies and can be created with a keyword `new`:
+     *
+     * $worker->registerActivity(MyActivity::class);
+     *
+     * In case an activity class requires some external dependencies provide a callback - factory
+     * that creates or builds a new activity instance. The factory should be a callable which accepts
+     * an instance of ReflectionClass with an activity class which should be created.
+     *
+     * $worker->registerActivity(MyActivity::class, fn(ReflectionClass $class) => $container->create($class->getName()));
+     */
+    public function registerActivity(string $type, callable $factory = null): self;
 
     /**
      * Returns list of registered activities.

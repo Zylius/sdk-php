@@ -11,10 +11,13 @@ declare(strict_types=1);
 
 namespace Temporal\Internal\Workflow;
 
-use Carbon\CarbonInterface;
 use React\Promise\Deferred;
 use React\Promise\PromiseInterface;
+use RuntimeException;
 use Temporal\Activity\ActivityOptions;
+use Temporal\Activity\ActivityOptionsInterface;
+use Temporal\Activity\LocalActivityOptions;
+use Temporal\Common\Uuid;
 use Temporal\DataConverter\EncodedValues;
 use Temporal\DataConverter\Type;
 use Temporal\DataConverter\ValuesInterface;
@@ -23,6 +26,8 @@ use Temporal\Internal\ServiceContainer;
 use Temporal\Internal\Support\DateInterval;
 use Temporal\Internal\Support\StackRenderer;
 use Temporal\Internal\Transport\ClientInterface;
+use Temporal\Internal\Transport\CompletableResultInterface;
+use Temporal\Internal\Transport\Request\Cancel;
 use Temporal\Internal\Transport\Request\CompleteWorkflow;
 use Temporal\Internal\Transport\Request\ContinueAsNew;
 use Temporal\Internal\Transport\Request\GetVersion;
@@ -30,6 +35,7 @@ use Temporal\Internal\Transport\Request\NewTimer;
 use Temporal\Internal\Transport\Request\Panic;
 use Temporal\Internal\Transport\Request\SideEffect;
 use Temporal\Promise;
+use Temporal\Worker\Transport\Command\CommandInterface;
 use Temporal\Worker\Transport\Command\RequestInterface;
 use Temporal\Workflow\ActivityStubInterface;
 use Temporal\Workflow\ChildWorkflowOptions;
@@ -39,8 +45,10 @@ use Temporal\Workflow\ExternalWorkflowStubInterface;
 use Temporal\Workflow\WorkflowContextInterface;
 use Temporal\Workflow\WorkflowExecution;
 use Temporal\Workflow\WorkflowInfo;
+use Temporal\Internal\Transport\Request\UpsertSearchAttributes;
 
 use function React\Promise\reject;
+use function React\Promise\resolve;
 
 class WorkflowContext implements WorkflowContextInterface
 {
@@ -52,6 +60,11 @@ class WorkflowContext implements WorkflowContextInterface
     protected ?ValuesInterface $lastCompletionResult = null;
 
     protected array $awaits = [];
+    protected array $asyncAwaits = [];
+    /**
+     * @var <CompletableResultInterface, CommandInterface>
+     */
+    protected \SplObjectStorage $timers;
 
     private array $trace = [];
     private bool $continueAsNew = false;
@@ -76,6 +89,7 @@ class WorkflowContext implements WorkflowContextInterface
         $this->workflowInstance = $workflowInstance;
         $this->input = $input;
         $this->lastCompletionResult = $lastCompletionResult;
+        $this->timers = new \SplObjectStorage();
     }
 
     /**
@@ -174,8 +188,9 @@ class WorkflowContext implements WorkflowContextInterface
      */
     public function getVersion(string $changeId, int $minSupported, int $maxSupported): PromiseInterface
     {
-        return $this->request(
-            new GetVersion($changeId, $minSupported, $maxSupported)
+        return EncodedValues::decodePromise(
+            $this->request(new GetVersion($changeId, $minSupported, $maxSupported)),
+            Type::TYPE_ANY
         );
     }
 
@@ -293,7 +308,7 @@ class WorkflowContext implements WorkflowContextInterface
         string $type,
         ChildWorkflowOptions $options = null
     ): ChildWorkflowStubInterface {
-        $options ??= new ChildWorkflowOptions();
+        $options ??= (new ChildWorkflowOptions())->withNamespace($this->getInfo()->namespace);
 
         return new ChildWorkflowStub($this->services->marshaller, $type, $options);
     }
@@ -304,11 +319,12 @@ class WorkflowContext implements WorkflowContextInterface
     public function newChildWorkflowStub(string $class, ChildWorkflowOptions $options = null): object
     {
         $workflow = $this->services->workflowsReader->fromClass($class);
+        $options = $options ?? (new ChildWorkflowOptions())->withNamespace($this->getInfo()->namespace);
 
         return new ChildWorkflowProxy(
             $class,
             $workflow,
-            $options ?? new ChildWorkflowOptions(),
+            $options,
             $this
         );
     }
@@ -339,7 +355,7 @@ class WorkflowContext implements WorkflowContextInterface
     public function executeActivity(
         string $type,
         array $args = [],
-        ActivityOptions $options = null,
+        ActivityOptionsInterface $options = null,
         \ReflectionType $returnType = null
     ): PromiseInterface {
         return $this->newUntypedActivityStub($options)->execute($type, $args, $returnType);
@@ -348,7 +364,7 @@ class WorkflowContext implements WorkflowContextInterface
     /**
      * {@inheritDoc}
      */
-    public function newUntypedActivityStub(ActivityOptions $options = null): ActivityStubInterface
+    public function newUntypedActivityStub(ActivityOptionsInterface $options = null): ActivityStubInterface
     {
         $options ??= new ActivityOptions();
 
@@ -358,9 +374,13 @@ class WorkflowContext implements WorkflowContextInterface
     /**
      * {@inheritDoc}
      */
-    public function newActivityStub(string $class, ActivityOptions $options = null): object
+    public function newActivityStub(string $class, ActivityOptionsInterface $options = null): object
     {
         $activities = $this->services->activitiesReader->fromClass($class);
+
+        if (isset($activities[0]) && $activities[0]->isLocalActivity() && !$options instanceof LocalActivityOptions) {
+            throw new RuntimeException("Local activity can be used only with LocalActivityOptions");
+        }
 
         return new ActivityProxy(
             $class,
@@ -375,9 +395,11 @@ class WorkflowContext implements WorkflowContextInterface
      */
     public function timer($interval): PromiseInterface
     {
-        return $this->request(
-            new NewTimer(DateInterval::parse($interval, DateInterval::FORMAT_SECONDS))
-        );
+        $request = new NewTimer(DateInterval::parse($interval, DateInterval::FORMAT_SECONDS));
+        $result = $this->request($request);
+        $this->timers->attach($result, $request);
+
+        return $result;
     }
 
     /**
@@ -400,19 +422,37 @@ class WorkflowContext implements WorkflowContextInterface
     /**
      * {@inheritDoc}
      */
+    public function upsertSearchAttributes(array $searchAttributes): void
+    {
+        $this->services->client->request(
+            new UpsertSearchAttributes($searchAttributes)
+        );
+    }
+
+    /**
+     * {@inheritDoc}
+     */
     public function await(...$conditions): PromiseInterface
     {
         $result = [];
+        $conditionGroupId = Uuid::v4();
 
         foreach ($conditions as $condition) {
             assert(\is_callable($condition) || $condition instanceof PromiseInterface);
 
-            if ($condition instanceof PromiseInterface) {
-                $result[] = $condition;
-                continue;
+            if ($condition instanceof \Closure) {
+                $callableResult = $condition($conditionGroupId);
+                if ($callableResult === true) {
+                    $this->resolveConditionGroup($conditionGroupId);
+                    return resolve(true);
+                }
+                $result[] = $this->addCondition($conditionGroupId, $condition);
             }
 
-            $result[] = $this->addCondition($condition);
+            if ($condition instanceof PromiseInterface)
+            {
+                $result[] = $this->addAsyncCondition($conditionGroupId, $condition);
+            }
         }
 
         if (\count($result) === 1) {
@@ -440,25 +480,43 @@ class WorkflowContext implements WorkflowContextInterface
      */
     public function resolveConditions(): void
     {
-        foreach ($this->awaits as $i => $cond) {
-            [$condition, $deferred] = $cond;
-            if ($condition()) {
-                unset($this->awaits[$i]);
-                $deferred->resolve();
+        foreach ($this->awaits as $awaitsGroupId => $awaitsGroup) {
+            foreach ($awaitsGroup as $i => $cond) {
+                [$condition, $deferred] = $cond;
+                if ($condition()) {
+                    $deferred->resolve();
+                    unset($this->awaits[$awaitsGroupId][$i]);
+                    $this->resolveConditionGroup($awaitsGroupId);
+                }
             }
         }
     }
 
     /**
+     * @param string $conditionGroupId
      * @param callable $condition
      * @return PromiseInterface
      */
-    protected function addCondition(callable $condition): PromiseInterface
+    protected function addCondition(string $conditionGroupId, callable $condition): PromiseInterface
     {
         $deferred = new Deferred();
-        $this->awaits[] = [$condition, $deferred];
+        $this->awaits[$conditionGroupId][] = [$condition, $deferred];
 
         return $deferred->promise();
+    }
+
+    protected function addAsyncCondition(string $conditionGroupId, PromiseInterface $condition): PromiseInterface
+    {
+        $this->asyncAwaits[$conditionGroupId][] = $condition;
+        return $condition->then(
+            function ($result) use ($conditionGroupId) {
+                $this->resolveConditionGroup($conditionGroupId);
+                return $result;
+            },
+            function () use ($conditionGroupId) {
+                $this->rejectConditionGroup($conditionGroupId);
+            }
+        );
     }
 
     /**
@@ -469,5 +527,57 @@ class WorkflowContext implements WorkflowContextInterface
     protected function recordTrace(): void
     {
         $this->trace = \debug_backtrace(\DEBUG_BACKTRACE_IGNORE_ARGS);
+    }
+
+    public function resolveConditionGroup(string $conditionGroupId): void
+    {
+        // First resolve pending promises
+        if (isset($this->awaits[$conditionGroupId])) {
+            foreach ($this->awaits[$conditionGroupId] as $i => $cond) {
+                [$_, $deferred] = $cond;
+                unset($this->awaits[$conditionGroupId][$i]);
+                $deferred->resolve();
+            }
+            unset($this->awaits[$conditionGroupId]);
+        }
+
+        $this->clearAsyncAwaits($conditionGroupId);
+    }
+
+    public function rejectConditionGroup(string $conditionGroupId): void
+    {
+        if (isset($this->awaits[$conditionGroupId])) {
+            foreach ($this->awaits[$conditionGroupId] as $i => $cond) {
+                [$_, $deferred] = $cond;
+                unset($this->awaits[$conditionGroupId][$i]);
+                $deferred->reject();
+            }
+            unset($this->awaits[$conditionGroupId]);
+        }
+
+        $this->clearAsyncAwaits($conditionGroupId);
+    }
+
+    private function clearAsyncAwaits(string $conditionGroupId): void
+    {
+        // Check pending timers in this group
+        if (!isset($this->asyncAwaits[$conditionGroupId])) {
+            return;
+        }
+
+        // Then cancel any pending timers if exist
+        foreach ($this->asyncAwaits[$conditionGroupId] as $index => $awaitCondition) {
+            if (!$awaitCondition->isComplete()) {
+                /** @var NewTimer $timer */
+                $timer = $this->timers->offsetGet($awaitCondition);
+                if ($timer !== null) {
+                    $request = new Cancel($timer->getID());
+                    $this->request($request);
+                    $this->timers->offsetUnset($awaitCondition);
+                }
+            }
+            unset($this->asyncAwaits[$conditionGroupId][$index]);
+        }
+        unset($this->asyncAwaits[$conditionGroupId]);
     }
 }

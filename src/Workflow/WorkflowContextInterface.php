@@ -13,6 +13,7 @@ namespace Temporal\Workflow;
 
 use React\Promise\PromiseInterface;
 use Temporal\Activity\ActivityOptions;
+use Temporal\Activity\ActivityOptionsInterface;
 use Temporal\DataConverter\Type;
 use Temporal\DataConverter\ValuesInterface;
 use Temporal\Internal\Support\DateInterval;
@@ -21,7 +22,7 @@ use Temporal\Worker\Environment\EnvironmentInterface;
 use Temporal\Workflow;
 
 /**
- * @psalm-import-type DateIntervalFormat from DateInterval
+ * @psalm-import-type DateIntervalValue from DateInterval
  */
 interface WorkflowContextInterface extends EnvironmentInterface
 {
@@ -119,7 +120,7 @@ interface WorkflowContextInterface extends EnvironmentInterface
     /**
      * @see Workflow::timer()
      *
-     * @param DateIntervalFormat|int $interval
+     * @param DateIntervalValue $interval
      * @return PromiseInterface
      * @see DateInterval
      */
@@ -225,7 +226,7 @@ interface WorkflowContextInterface extends EnvironmentInterface
     public function executeActivity(
         string $type,
         array $args = [],
-        ActivityOptions $options = null,
+        ActivityOptionsInterface $options = null,
         \ReflectionType $returnType = null
     ): PromiseInterface;
 
@@ -234,18 +235,18 @@ interface WorkflowContextInterface extends EnvironmentInterface
      *
      * @psalm-template T of object
      * @param class-string<T> $class
-     * @param ActivityOptions|null $options
+     * @param ActivityOptionsInterface|null $options
      * @return T
      */
-    public function newActivityStub(string $class, ActivityOptions $options = null): object;
+    public function newActivityStub(string $class, ActivityOptionsInterface $options = null): object;
 
     /**
      * @see Workflow::newUntypedActivityStub()
      *
-     * @param ActivityOptions|null $options
+     * @param ActivityOptionsInterface|null $options
      * @return ActivityStubInterface
      */
-    public function newUntypedActivityStub(ActivityOptions $options = null): ActivityStubInterface;
+    public function newUntypedActivityStub(ActivityOptionsInterface $options = null): ActivityStubInterface;
 
     /**
      * @see Workflow::await()
@@ -261,7 +262,7 @@ interface WorkflowContextInterface extends EnvironmentInterface
      * Returns {@see true} if any of conditions were fired and {@see false} if
      * timeout was reached.
      *
-     * @param int|DateInterval $interval
+     * @param DateIntervalValue $interval
      * @param callable|PromiseInterface ...$conditions
      * @return PromiseInterface
      */
@@ -273,4 +274,9 @@ interface WorkflowContextInterface extends EnvironmentInterface
      * @return string
      */
     public function getStackTrace(): string;
+
+    /**
+     * @param array<string, mixed> $searchAttributes
+     */
+    public function upsertSearchAttributes(array $searchAttributes): void;
 }
